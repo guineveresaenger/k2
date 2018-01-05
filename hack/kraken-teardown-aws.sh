@@ -84,7 +84,8 @@ delete_keypair () {
 delete_instances () {
   [ $# -gt 0 ] || return 0
   info "Terminating Instances: $@"
-  echo aws ${AWS_COMMON_ARGS} ec2 terminate-instances  --instance-ids "$@" 
+  echo aws ${AWS_COMMON_ARGS} ec2 terminate-instances  --instance-ids "$@"
+  echo aws ${AWS_COMMON_ARGS} ec2 wait instance-terminated  --instance-ids "$@"
 }
 
 delete_elb (){ 
@@ -266,6 +267,7 @@ delete_cluster_artifacts () {
   while read zone; do
     delete_route53_zone ${zone}
   done < <(list_route53_zones_by_name "$1.internal.")
+
 
   rm  ${roles_to_delete} ${keys_to_delete}
 }

@@ -60,11 +60,13 @@ fail(){
 }
 
 delete_deployment () {
+    info "Deleting deployment..."
     echo gcloud deployment-manager deployments delete "$1" \
         --project "${2}" --zone "${3}"
 }
 
 delete_cluster () {
+    info "Deleting cluster..."
     echo gcloud container clusters delete "$1" \
         --project "${2}" --zone "${3}"
 }
@@ -100,7 +102,7 @@ delete_cluster_artifacts () {
     local project="$3"
 
     clusters_to_kill=`mktemp /tmp/gkeclusters_delete.XXXXXX`
-
+    
     while read dname status manifest; do
 
         while read cname; do
