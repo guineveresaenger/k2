@@ -204,6 +204,7 @@ delete_cluster_artifacts () {
   keys_to_delete=`mktemp /tmp/delete_keys.XXXXXX`
 
   # Iterate through autoscaling groups for this cluster.
+  info "Interrogating AutoScaling Groups..."
   while read asgname; do
     while read asgname arn lcn; do
         # Remove the autoscaling group
@@ -223,20 +224,24 @@ delete_cluster_artifacts () {
     done < <(describe_asg ${asgname})
   done < <(list_asg_by_cluster_tag "$1")
   
+  info "Interrogating KeyPairs..."
   while read kpn; do
     delete_keypair ${kpn}
   done < <(sort ${keys_to_delete} | uniq)
 
   # Remove remaining EC2 instances
+  info "Deleting instances..."
   delete_instances `describe_cluster_instances ${1} | awk '{ print $1 }'`
 
   # Remove associated load balancers
+  info "Interrogating Load Balancers..."
   while read elb; do
     delete_elb ${elb}
   done < <(list_elb_by_cluster_tag "$1")
 
 
   # Remove associated VPC
+  info "Interrogating VPCs..."
   while read vpcid vpcName; do
 
     # Remove associated network interfaces
@@ -248,6 +253,7 @@ delete_cluster_artifacts () {
   done < <(list_vpc_by_cluster_tag "$1")
 
   # Remove associated IAM roles
+  info "Interrogating IAM assets..."
   while read iamprofile; do
     while read role profile; do
       delete_iam_profile ${profile}
@@ -256,6 +262,7 @@ delete_cluster_artifacts () {
   done < <(sort ${roles_to_delete} | uniq)
 
   # Remove zones associated with the cluster
+  info "Interrogating DNS Zones..."
   while read zone; do
     delete_route53_zone ${zone}
   done < <(list_route53_zones_by_name "$1.internal.")

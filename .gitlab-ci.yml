@@ -192,7 +192,7 @@ teardown:teardown-aws:
   when: always
   script:
     - test -f "$CI_PROJECT_DIR/cluster/aws/config.yaml" || exit $?
-    - ./hack/kraken-teardown-aws.sh -c krakenlib-$CI_PIPELINE_ID | bash -o xtrace
+    - VERBOSE=1 ./hack/kraken-teardown-aws.sh -c krakenlib-$CI_PIPELINE_ID | bash -o xtrace
 
 teardown:teardown-gke:
   stage: teardown
@@ -200,7 +200,7 @@ teardown:teardown-gke:
   when: always
   script:
     - test -f "$CI_PROJECT_DIR/cluster/gke/config.yaml" || exit $?
-    - ./hack/kraken-teardown-gke.sh -c krakenlib-$CI_PIPELINE_ID-k2-deployment -z $DEFAULT_GCP_ZONE -p $GCP_PROJECT | bash -o xtrace
+    - VERBOSE=1 ./hack/kraken-teardown-gke.sh -c krakenlib-$CI_PIPELINE_ID-k2-deployment -z $DEFAULT_GCP_ZONE -p $GCP_PROJECT | bash -o xtrace
   variables:
     DEFAULT_GCP_ZONE: us-east1-b
     GCP_PROJECT: k8s-work
