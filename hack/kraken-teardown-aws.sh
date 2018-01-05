@@ -67,7 +67,8 @@ fail(){
 }
 
 delete_asg () {
-  info "Deleting ASG: $1"  
+  info "Deleting ASG: $1"
+  echo aws autoscaling detach-instances --instance ids `describe_cluster_instances ${1} | awk '{ print $1 }'` --auto-scaling-group-name "$1" --should-decrement-desired-capacity
   echo aws ${AWS_COMMON_ARGS} autoscaling delete-auto-scaling-group --auto-scaling-group-name "$1"
 }
 
