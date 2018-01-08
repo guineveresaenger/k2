@@ -68,8 +68,7 @@ fail(){
 
 delete_asg () {
   info "Deleting ASG: $1"
-  echo aws autoscaling detach-instances --instance ids `describe_cluster_instances ${1} | awk '{ print $1 }'` --auto-scaling-group-name "$1" --should-decrement-desired-capacity
-  echo aws ${AWS_COMMON_ARGS} autoscaling delete-auto-scaling-group --auto-scaling-group-name "$1"
+  echo aws ${AWS_COMMON_ARGS} autoscaling delete-auto-scaling-group --auto-scaling-group-name "$1" --force-delete
 }
 
 delete_launchconfig () {
@@ -205,10 +204,13 @@ delete_cluster_artifacts () {
   roles_to_delete=`mktemp /tmp/delete_roles.XXXXXX`
   keys_to_delete=`mktemp /tmp/delete_keys.XXXXXX`
 
+  
+
   # Iterate through autoscaling groups for this cluster.
   info "Interrogating AutoScaling Groups..."
   while read asgname; do
     while read asgname arn lcn; do
+      
         # Remove the autoscaling group
         delete_asg ${asgname}
         
@@ -222,6 +224,7 @@ delete_cluster_artifacts () {
           # Remove launch configuration
           delete_launchconfig ${lcn}
         done < <([ -n "${lcn}" ] && describe_launchconfig ${lcn})
+        rm ${instances_to_detach}
 
     done < <(describe_asg ${asgname})
   done < <(list_asg_by_cluster_tag "$1")
