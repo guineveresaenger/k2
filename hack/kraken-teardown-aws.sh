@@ -224,8 +224,6 @@ delete_cluster_artifacts () {
           # Remove launch configuration
           delete_launchconfig ${lcn}
         done < <([ -n "${lcn}" ] && describe_launchconfig ${lcn})
-        rm ${instances_to_detach}
-
     done < <(describe_asg ${asgname})
   done < <(list_asg_by_cluster_tag "$1")
   
