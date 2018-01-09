@@ -201,7 +201,9 @@ list_route53_zones_by_name () {
 }
 
 list_resource_recordsets () {
-  aws route53 list-resource-record-sets --hosted-zone-id "$1" --query="ResourceRecordSets[*].Name"
+  aws ${AWS_COMMON_ARGS} route53 list-resource-record-sets --hosted-zone-id "$1" \
+    --query="ResourceRecordSets[*].{a:Type, b:Name}" --output=text \
+      | awk '{ if ($1 !~ /^(NS|SOA)$/) { print $1, $2 } }'
 }
 
 
@@ -278,7 +280,7 @@ delete_cluster_artifacts () {
   # Remove zones associated with the cluster
 
   while read zone; do
-    while read recordset; do
+    while read _type recordset; do
       delete_resource_recordsets ${zone} ${recordset}
     done < <(list_resource_recordsets ${zone})
     delete_route53_zone ${zone}
