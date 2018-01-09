@@ -114,12 +114,11 @@ delete_route53_zone () {
 }
 
 delete_resource_recordsets () {
-  echo unicorns
+  echo unicorns and hosted zone again
+  echo $1
   echo aws route53 change-resource-record-sets \
-    --hosted-zone-id /hostedzone/Z2WQIUS2TCWWH2 \
-    --change-batch '{"Changes":[{"Action":"DELETE","ResourceRecordSet":
-          '"$1"'
-        }]}'
+    --hosted-zone-id "$1" \
+    --change-batch '{"Changes":[{"Action":"DELETE","ResourceRecordSet":{"Name":'"$2"'}}]}'
 }
 
 describe_cluster_instances () {
@@ -280,7 +279,7 @@ delete_cluster_artifacts () {
 
   while read zone; do
     while read recordset; do
-      delete_resource_recordsets ${recordset}
+      delete_resource_recordsets ${zone} ${recordset}
     done < <(list_resource_recordsets ${zone})
     delete_route53_zone ${zone}
   done < <(list_route53_zones_by_name "$1.internal.")
