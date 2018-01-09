@@ -67,56 +67,59 @@ fail(){
 }
 
 delete_asg () {
-  info "Deleting ASG: $1"
   echo aws ${AWS_COMMON_ARGS} autoscaling delete-auto-scaling-group --auto-scaling-group-name "$1" --force-delete
 }
 
 delete_launchconfig () {
-  info "Deleting Launch Configuration: $1"
   echo aws ${AWS_COMMON_ARGS} autoscaling delete-launch-configuration --launch-configuration-name "$1"
 }
 
 delete_keypair () {
-  info "Deleting Key Pair: $1"
   echo aws ${AWS_COMMON_ARGS} ec2 delete-key-pair --key-name "$1"
 }
 
 delete_instances () {
   [ $# -gt 0 ] || return 0
-  info "Terminating Instances: $@"
   echo aws ${AWS_COMMON_ARGS} ec2 terminate-instances  --instance-ids "$@"
   echo aws ${AWS_COMMON_ARGS} ec2 wait instance-terminated  --instance-ids "$@"
 }
 
 delete_elb (){ 
-  info "Deleting LoadBalancer: $1"
   echo aws ${AWS_COMMON_ARGS} elb delete-load-balancer --load-balancer-name "$1"
 }
 
 delete_vpc () {
-  info "Deleting VPC: $1"
   echo aws ${AWS_COMMON_ARGS} ec2 delete-vpc --vpc-id "$1"
 }
 
 delete_eni () {
-  info "Deleting Network Interface: $1"
   echo aws ${AWS_COMMON_ARGS} ec2 delete-network-interface  \
     --network-interface-id "$1"
 }
 
+detach_eni () {
+  echo aws ${AWS_COMMON_ARGS} ec2 detach-network-interface --attachment-id "$1"
+}
+
 delete_iam_profile () {
-  info "Deleting IAM Profile: $1"
   echo aws iam delete-instance-profile --instance-profile-name "$1"
 }
 
 delete_iam_role () {
-  info "Deleting IAM Role: $1"
   echo aws iam delete-role --role-name "$1"
 }
 
 delete_route53_zone () {
-  info "Deleting Route53 zone: $1"
   echo aws route53 delete-hosted-zone --id "$1"
+}
+
+delete_resource_recordsets () {
+  echo unicorns
+  echo aws route53 change-resource-record-sets \
+    --hosted-zone-id /hostedzone/Z2WQIUS2TCWWH2 \
+    --change-batch '{"Changes":[{"Action":"DELETE","ResourceRecordSet":
+          '"$1"'
+        }]}'
 }
 
 describe_cluster_instances () {
@@ -153,7 +156,7 @@ list_elb_cluster_tags () {
   test "${DEBUG:-0}" -eq 1 && print_exec="-t"
 
   # This is a pagination hack. LOL.
-  echo "${@}" | tr -s ' ' '\n' | xargs ${print_exec} -n 20 -J % \
+  echo "${@}" | tr -s ' ' '\n' | xargs ${print_exec} -n 20 -I % \
     aws ${AWS_COMMON_ARGS} elb describe-tags \
     --load-balancer-names % \
     --query="TagDescriptions[*].{a:LoadBalancerName, b:Tags[?Key=='KubernetesCluster']|[0].Value}"
@@ -176,6 +179,11 @@ list_eni_by_vpc_id () {
     --query="NetworkInterfaces[].{a:NetworkInterfaceId, b:SubnetId, c:VpcId, d:Status}"
 }
 
+get_eni_attachment_id () {
+  aws ${AWS_COMMON_ARGS} ec2 describe-network-interfaces \
+    --network-interface-ids "$1" | awk "{ if(\$1 == \"ATTACHMENT\") { print \$3 } }"
+}
+
 list_vpc_by_cluster_tag () {
   aws ${AWS_COMMON_ARGS} ec2 describe-vpcs \
     --filter "Name=tag:KubernetesCluster, Values=$1" \
@@ -193,6 +201,10 @@ list_route53_zones_by_name () {
       | awk "{ if(\$1 == \"$1\") { print \$2 }}"
 }
 
+list_resource_recordsets () {
+  aws route53 list-resource-record-sets --hosted-zone-id "$1" --query="ResourceRecordSets[*].Name"
+}
+
 
 # Removes various resources from AWS in the proper order.
 delete_cluster_artifacts () {
@@ -207,7 +219,6 @@ delete_cluster_artifacts () {
   
 
   # Iterate through autoscaling groups for this cluster.
-  info "Interrogating AutoScaling Groups..."
   while read asgname; do
     while read asgname arn lcn; do
       
@@ -227,28 +238,30 @@ delete_cluster_artifacts () {
     done < <(describe_asg ${asgname})
   done < <(list_asg_by_cluster_tag "$1")
   
-  info "Interrogating KeyPairs..."
   while read kpn; do
     delete_keypair ${kpn}
   done < <(sort ${keys_to_delete} | uniq)
 
   # Remove remaining EC2 instances
-  info "Deleting instances..."
   delete_instances `describe_cluster_instances ${1} | awk '{ print $1 }'`
 
   # Remove associated load balancers
-  info "Interrogating Load Balancers..."
   while read elb; do
     delete_elb ${elb}
   done < <(list_elb_by_cluster_tag "$1")
 
 
   # Remove associated VPC
-  info "Interrogating VPCs..."
   while read vpcid vpcName; do
+
 
     # Remove associated network interfaces
     while read eni sni _ status; do
+
+      while read eni_attachment_id; do
+       detach_eni ${eni_attachment_id}
+      done < <(get_eni_attachment_id ${eni})
+
       delete_eni ${eni}
     done < <(list_eni_by_vpc_id "${vpcid}")
   
@@ -256,7 +269,6 @@ delete_cluster_artifacts () {
   done < <(list_vpc_by_cluster_tag "$1")
 
   # Remove associated IAM roles
-  info "Interrogating IAM assets..."
   while read iamprofile; do
     while read role profile; do
       delete_iam_profile ${profile}
@@ -265,8 +277,11 @@ delete_cluster_artifacts () {
   done < <(sort ${roles_to_delete} | uniq)
 
   # Remove zones associated with the cluster
-  info "Interrogating DNS Zones..."
+
   while read zone; do
+    while read recordset; do
+      delete_resource_recordsets ${recordset}
+    done < <(list_resource_recordsets ${zone})
     delete_route53_zone ${zone}
   done < <(list_route53_zones_by_name "$1.internal.")
 
