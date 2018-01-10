@@ -66,6 +66,13 @@ fail(){
   return $1
 }
 
+
+
+require_util () {
+    which -s "$@" >/dev/null || fail 5 "This script requires utility: $@"
+}
+
+
 delete_asg () {
   echo aws ${AWS_COMMON_ARGS} autoscaling delete-auto-scaling-group --auto-scaling-group-name "$1" --force-delete
 }
@@ -113,12 +120,17 @@ delete_route53_zone () {
   echo aws route53 delete-hosted-zone --id "$1"
 }
 
-delete_resource_recordsets () {
-  echo unicorns and hosted zone again
-  echo $1
+delete_route53_zone_records () {
+  while read json; do
+    delete_route53_resource_recordsets $1  "${json}"
+  done < <(list_route53_recordsets_for_deletion $1)
+}
+
+delete_route53_resource_recordsets () {
   echo aws route53 change-resource-record-sets \
     --hosted-zone-id "$1" \
-    --change-batch '{"Changes":[{"Action":"DELETE","ResourceRecordSet":{"Name":'"$2"'}}]}'
+    --change-batch "${2}" \
+    --output text --query 'ChangeInfo.Id'
 }
 
 describe_cluster_instances () {
@@ -196,14 +208,17 @@ list_iam_roles_for_profile () {
 
 list_route53_zones_by_name () {
   aws ${AWS_COMMON_ARGS} route53 list-hosted-zones \
-    --query="HostedZones[*].{b:Id, a:Name}" --max-items=10000  \
+    --query="HostedZones[*].{b:Id, a:Name}" --max-items=10000 \
       | awk "{ if(\$1 == \"$1\") { print \$2 }}"
 }
 
-list_resource_recordsets () {
-  aws ${AWS_COMMON_ARGS} route53 list-resource-record-sets --hosted-zone-id "$1" \
-    --query="ResourceRecordSets[*].{a:Type, b:Name}" --output=text \
-      | awk '{ if ($1 !~ /^(NS|SOA)$/) { print $1, $2 } }'
+
+list_route53_recordsets_for_deletion () {
+  # Generate a series of JSON objects for passing into `change-resource-record-sets` to DELETE records.
+  aws --region=${AWS_REGION} --output=json route53 list-resource-record-sets \
+    --hosted-zone-id "$1" \
+    --query="ResourceRecordSets[*].{Type:Type, Name:Name, TTL:TTL, ResourceRecords:ResourceRecords}" \
+      | jq -cj '.[] | select(.Type | test("^(NS|SOA)$") | not) | "{\"Changes\":[ { \"Action\":\"DELETE\",\"ResourceRecordSet\": \(.) }]}\n"'
 }
 
 
@@ -216,9 +231,7 @@ delete_cluster_artifacts () {
 
   roles_to_delete=`mktemp /tmp/delete_roles.XXXXXX`
   keys_to_delete=`mktemp /tmp/delete_keys.XXXXXX`
-
   
-
   # Iterate through autoscaling groups for this cluster.
   while read asgname; do
     while read asgname arn lcn; do
@@ -278,11 +291,8 @@ delete_cluster_artifacts () {
   done < <(sort ${roles_to_delete} | uniq)
 
   # Remove zones associated with the cluster
-
   while read zone; do
-    while read _type recordset; do
-      delete_resource_recordsets ${zone} ${recordset}
-    done < <(list_resource_recordsets ${zone})
+    delete_route53_zone_records ${zone}
     delete_route53_zone ${zone}
   done < <(list_route53_zones_by_name "$1.internal.")
 
@@ -291,6 +301,8 @@ delete_cluster_artifacts () {
 }
 
 
+require_util jq
+require_util awk
 
 
 main () {
