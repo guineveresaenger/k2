@@ -116,6 +116,12 @@ delete_iam_role () {
   echo aws iam delete-role --role-name "$1"
 }
 
+remove_role_from_instance_profile () {
+  echo aws ${AWS_COMMON_ARGS} iam remove-role-from-instance-profile \
+    --instance-profile-name ${2} \
+    --role-name ${1}
+}
+
 delete_route53_zone () {
   echo aws ${AWS_COMMON_ARGS} route53 delete-hosted-zone --id "$1"
 }
@@ -329,6 +335,7 @@ delete_cluster_artifacts () {
   # Remove associated IAM roles
   while read iamprofile; do
     while read role profile; do
+      remove_role_from_instance_profile ${role} ${profile}
       delete_iam_role ${role}
       delete_iam_profile ${profile}
     done < <(list_iam_roles_for_profile ${iamprofile})
