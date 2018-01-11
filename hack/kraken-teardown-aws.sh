@@ -117,7 +117,7 @@ delete_iam_role () {
 }
 
 delete_route53_zone () {
-  echo aws route53 delete-hosted-zone --id "$1"
+  echo aws ${AWS_COMMON_ARGS} route53 delete-hosted-zone --id "$1"
 }
 
 delete_route53_zone_records () {
@@ -127,10 +127,42 @@ delete_route53_zone_records () {
 }
 
 delete_route53_resource_recordsets () {
-  echo aws route53 change-resource-record-sets \
+  echo aws ${AWS_COMMON_ARGS} route53 change-resource-record-sets \
     --hosted-zone-id "$1" \
     --change-batch "${2}" \
     --output text --query 'ChangeInfo.Id'
+}
+
+delete_subnet_by_id () {
+  echo aws ${AWS_COMMON_ARGS} ec2 delete-subnet  --subnet-id $1
+}
+
+delete_security_group_by_id () {
+  echo aws ${AWS_COMMON_ARGS} ec2 delete-security-group --group-id $1
+}
+
+delete_security_groups_by_vpc_id () {
+  while read groupid _; do
+    delete_security_group_by_id ${groupid}
+  done < <(list_security_groups_by_vpc_id $1)
+}
+
+delete_subnets_by_vpc_id () {
+    while read cluster subnetid _; do
+      delete_subnet_by_id ${subnetid}
+    done < <(list_subnet_by_vpc_id "${1}")
+}
+
+delete_network_interfaces_by_vpc_id () {
+  while read eni sni _ status; do
+
+    while read eni_attachment_id; do
+      detach_eni ${eni_attachment_id}
+    done < <(get_eni_attachment_id ${eni})
+
+    # TODO wait for ENI deletion
+    delete_eni ${eni}
+  done < <(list_eni_by_vpc_id "${1}")
 }
 
 describe_cluster_instances () {
@@ -173,7 +205,7 @@ list_elb_cluster_tags () {
     --query="TagDescriptions[*].{a:LoadBalancerName, b:Tags[?Key=='KubernetesCluster']|[0].Value}"
 }
 
-list_elb_by_cluster_tag (){ 
+list_elb_by_cluster_tag () {
   list_elb_cluster_tags $(list_elb_all) | awk "{ if(\$2 == \"$1\"){ print \$1 } }"
 }
 
@@ -188,6 +220,18 @@ list_eni_by_vpc_id () {
   aws ${AWS_COMMON_ARGS} ec2 describe-network-interfaces \
     --filter="Name=vpc-id, Values=$1" \
     --query="NetworkInterfaces[].{a:NetworkInterfaceId, b:SubnetId, c:VpcId, d:Status}"
+}
+
+list_subnet_by_vpc_id () {
+  aws ${AWS_COMMON_ARGS} ec2 describe-subnets \
+    --filter="Name=vpc-id, Values=$1" \
+    --query="Subnets[].{a:Tags[?Key=='KubernetesCluster']|[0].Value, b:SubnetId, c:VpcId}"
+}
+
+list_security_groups_by_vpc_id () {
+  aws ${AWS_COMMON_ARGS} ec2 describe-security-groups \
+    --filter="Name=vpc-id, Values=$1" \
+    --query="SecurityGroups[].{a:GroupId, b:VpcId}"
 }
 
 get_eni_attachment_id () {
@@ -268,25 +312,25 @@ delete_cluster_artifacts () {
   # Remove associated VPC
   while read vpcid vpcName; do
 
-
     # Remove associated network interfaces
-    while read eni sni _ status; do
-
-      while read eni_attachment_id; do
-       detach_eni ${eni_attachment_id}
-      done < <(get_eni_attachment_id ${eni})
-
-      delete_eni ${eni}
-    done < <(list_eni_by_vpc_id "${vpcid}")
+    delete_network_interfaces_by_vpc_id ${vpcid}
   
+    # Remove associated subnets
+    delete_subnets_by_vpc_id ${vpcid}
+    
+    # Remove associated security groups
+    delete_security_groups_by_vpc_id ${vpcid}
+
+    # Finally delete the VPC
     delete_vpc ${vpcid}
+
   done < <(list_vpc_by_cluster_tag "$1")
 
   # Remove associated IAM roles
   while read iamprofile; do
     while read role profile; do
-      delete_iam_profile ${profile}
       delete_iam_role ${role}
+      delete_iam_profile ${profile}
     done < <(list_iam_roles_for_profile ${iamprofile})
   done < <(sort ${roles_to_delete} | uniq)
 
