@@ -108,6 +108,11 @@ detach_eni () {
   echo aws ${AWS_COMMON_ARGS} ec2 detach-network-interface --attachment-id "$1"
 }
 
+wait_for_eni_available () {
+  echo aws ${AWS_COMMON_ARGS} ec2 wait network-interface-available --network-interface-ids ${@}
+}
+
+
 delete_iam_profile () {
   echo aws iam delete-instance-profile --instance-profile-name "$1"
 }
@@ -160,15 +165,24 @@ delete_subnets_by_vpc_id () {
 }
 
 delete_network_interfaces_by_vpc_id () {
-  while read eni sni _ status; do
+  local attachments_cache=`mktemp /tmp/network_interfaces.XXXXXX`
 
-    while read eni_attachment_id; do
-      detach_eni ${eni_attachment_id}
-    done < <(get_eni_attachment_id ${eni})
+  list_eni_attachment_state_by_vpc_id $1 > ${attachments_cache}
 
-    # TODO wait for ENI deletion
+  # This looping structure attempts to optimize on some parallelism within AWS API.
+
+  while read eni _ subnetid _ status attachid; do
+    [ "${status}" == "in-use" ] && detach_eni "${attachid}"
+  done < ${attachments_cache}
+
+  # Ensure all the interfaces are unbound/detached/available
+  wait_for_eni_available $(awk '{ print $1 }' ${attachments_cache})
+
+  while read eni _ subnetid _ status attachid; do
     delete_eni ${eni}
-  done < <(list_eni_by_vpc_id "${1}")
+  done < ${attachments_cache}
+
+  rm ${attachments_cache}
 }
 
 describe_cluster_instances () {
@@ -240,9 +254,10 @@ list_security_groups_by_vpc_id () {
     --query="SecurityGroups[].{a:GroupId, b:VpcId}"
 }
 
-get_eni_attachment_id () {
+list_eni_attachment_state_by_vpc_id () {
   aws ${AWS_COMMON_ARGS} ec2 describe-network-interfaces \
-    --network-interface-ids "$1" | awk "{ if(\$1 == \"ATTACHMENT\") { print \$3 } }"
+    --query="NetworkInterfaces[].{a:NetworkInterfaceId, b:VpcId, c:SubnetId, d:InterfaceType, e:Status, f:Attachment.AttachmentId}" \
+    --filters="Name=vpc-id, Values=$1" 
 }
 
 list_vpc_by_cluster_tag () {
