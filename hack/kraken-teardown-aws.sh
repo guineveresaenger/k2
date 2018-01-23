@@ -72,6 +72,12 @@ require_util () {
     which -s "$@" >/dev/null || fail 5 "This script requires utility: $@"
 }
 
+dump_state_file () {
+  echo "# BEGIN $2 " >&2
+  sed 's@^@# @' $1 >&2
+  echo "# END $2 " >&2
+}
+
 
 delete_asg () {
   echo aws ${AWS_COMMON_ARGS} autoscaling delete-auto-scaling-group --auto-scaling-group-name "$1" --force-delete
@@ -109,7 +115,7 @@ detach_eni () {
 }
 
 wait_for_eni_available () {
-  echo aws ${AWS_COMMON_ARGS} ec2 wait network-interface-available --network-interface-ids ${@}
+  [ $# -eq 0 ] || echo aws ${AWS_COMMON_ARGS} ec2 wait network-interface-available --network-interface-ids ${@}
 }
 
 
@@ -132,8 +138,9 @@ delete_route53_zone () {
 }
 
 delete_route53_zone_records () {
+  local json
   while read json; do
-    delete_route53_resource_recordsets $1  "${json}"
+    delete_route53_resource_recordsets $1  "$(printf "'%s'" "${json}")"
   done < <(list_route53_recordsets_for_deletion $1)
 }
 
@@ -153,12 +160,17 @@ delete_security_group_by_id () {
 }
 
 delete_security_groups_by_vpc_id () {
-  while read groupid _; do
-    delete_security_group_by_id ${groupid}
+  local groupid sgname
+  while read groupid _ sgname; do
+    case "${sgname}" in
+      default) continue ;;
+      *) delete_security_group_by_id ${groupid};;
+    esac
   done < <(list_security_groups_by_vpc_id $1)
 }
 
 delete_subnets_by_vpc_id () {
+    local cluster subnetid
     while read cluster subnetid _; do
       delete_subnet_by_id ${subnetid}
     done < <(list_subnet_by_vpc_id "${1}")
@@ -183,6 +195,75 @@ delete_network_interfaces_by_vpc_id () {
   done < ${attachments_cache}
 
   rm ${attachments_cache}
+}
+
+delete_route_tables_by_vpc_id () {
+
+  local vpcid routetableid cidrblock ismain attachmentid gatewayid
+  local routes_cache=`mktemp /tmp/routes.XXXXXX`
+
+  list_route_tables_by_vpc_id $1 > ${routes_cache}
+
+  dump_state_file ${routes_cache} "Route cache"
+
+  # Detached any already-attached route tables
+  while read attachmentid ismain; do
+    [ "${attachmentid}" == "null" ] && continue
+    [ "${ismain}" == "true" ] && continue
+    echo aws ${AWS_COMMON_ARGS} ec2 disassociate-route-table --association-id "${attachmentid}"
+  done < <(awk '{ print $6, $5 }' ${routes_cache} | sort -u)
+
+  # Remove routes from the route tables
+  while read vpcid routetableid gatewayid cidrblock ismain _ attachmentid; do
+    [ "${ismain}" == "true" ] && continue
+    [ "${cidrblock}" == "null" ] && continue
+    [ "${gatewayid}" == "local" ] && continue
+    echo aws ${AWS_COMMON_ARGS} ec2 delete-route --route-table-id "${routetableid}" --destination-cidr-block "${cidrblock}"
+  done < <(sort -u ${routes_cache})
+
+
+  # Remove the actual route table from AWS
+  while read routetableid; do
+    echo aws ${AWS_COMMON_ARGS} ec2 delete-route-table --route-table-id "${routetableid}"
+  done < <(awk '{ print $2 }' ${routes_cache} | sort -u)
+
+
+
+  rm ${routes_cache}
+}
+
+delete_network_acls_by_vpc_id () {
+
+  local entry_egress aclid rulenum vpcid is_default
+  local acl_cache=`mktemp /tmp/networkacls.XXXXXX`
+
+  list_acls_by_vpc_id $1 > ${acl_cache}
+
+  while read rulenum aclid vpcid entry_egress is_default; do
+    [ "${rulenum}" -eq 32767 ] && continue
+    case ${entry_egress} in
+      true)
+        echo aws ${AWS_COMMON_ARGS} ec2 delete-network-acl-entry --network-acl-id ${aclid} --egress --rule-number ${rulenum}
+        ;;
+      false)
+        echo aws ${AWS_COMMON_ARGS} ec2 delete-network-acl-entry --network-acl-id ${aclid} --ingress --rule-number ${rulenum}
+        ;;
+    esac
+  done < <(sort -u ${acl_cache})
+
+  while read aclid is_default; do
+    [ "${is_default}" == "true" ] && continue
+    echo aws ${AWS_COMMON_ARGS} ec2 delete-network-acl --network-acl-id ${aclid}
+  done < <(awk '{print $2, $5}' ${acl_cache} | sort -u)
+
+  rm ${acl_cache}
+}
+
+detach_and_delete_gateways_by_vpc_id () {
+  while read gwid; do
+    echo aws ${AWS_COMMON_ARGS} ec2 detach-internet-gateway --internet-gateway-id ${gwid} --vpc-id ${1}
+    echo aws ${AWS_COMMON_ARGS} ec2 delete-internet-gateway --internet-gateway-id ${gwid}
+  done < <(list_gateways_by_vpc_id $1)
 }
 
 describe_cluster_instances () {
@@ -248,10 +329,36 @@ list_subnet_by_vpc_id () {
     --query="Subnets[].{a:Tags[?Key=='KubernetesCluster']|[0].Value, b:SubnetId, c:VpcId}"
 }
 
+list_acls_by_vpc_id () {
+  aws --region=${AWS_REGION} ec2 describe-network-acls \
+    --filter="Name=vpc-id, Values=$1" \
+    --query="NetworkAcls[].{ VpcId:VpcId, NetworkAclId:NetworkAclId, Entries:Entries, IsDefault:IsDefault}" \
+      | jq -r '.[] | (.Entries[] | {RuleNumber:.RuleNumber, Egress:.Egress}) + ({NetworkAclId:.NetworkAclId, VpcId:.VpcId, IsDefault:.IsDefault}) | "\(.RuleNumber) \(.NetworkAclId) \(.VpcId) \(.Egress) \(.IsDefault)"'
+}
+
+list_route_tables_by_vpc_id () {
+  # It's not possible to delete the *main* route table for a given VPC
+  # Generates a list of rows with fields: route-table-id, route-cidr-block, association-id
+  # Generally each route table will have only one association ID, but probably multiple routes.
+
+  aws --region=us-east-1 --output=json ec2 describe-route-tables \
+    --filter 'Name=vpc-id, Values=vpc-2678405e'  \
+    --query="RouteTables[]" \
+      | jq -r '.[] | {a: .VpcId , b: .RouteTableId} + ((.Associations + [null])[] | {e: .RouteTableAssociationId, d: .Main}) + (.Routes[] | { g: .GatewayId, x: .DestinationCidrBlock })  | "\(.a) \(.b) \(.g) \(.x) \(.d) \(.e)"'
+      
+}
+
+
+list_gateways_by_vpc_id () {
+  aws ${AWS_COMMON_ARGS} ec2 describe-internet-gateways \
+    --filter "Name=attachment.vpc-id, Values=$1" \
+    --query="InternetGateways[].{a: InternetGatewayId}"
+}
+
 list_security_groups_by_vpc_id () {
   aws ${AWS_COMMON_ARGS} ec2 describe-security-groups \
     --filter="Name=vpc-id, Values=$1" \
-    --query="SecurityGroups[].{a:GroupId, b:VpcId}"
+    --query="SecurityGroups[].{a:GroupId, b:VpcId, c:GroupName}"
 }
 
 list_eni_attachment_state_by_vpc_id () {
@@ -339,11 +446,21 @@ delete_cluster_artifacts () {
     # Remove associated subnets
     delete_subnets_by_vpc_id ${vpcid}
     
+    # Remove associated gateways
+    detach_and_delete_gateways_by_vpc_id ${vpcid}
+
+    # Remove associated network ACLs
+    delete_network_acls_by_vpc_id ${vpcid}
+
     # Remove associated security groups
     delete_security_groups_by_vpc_id ${vpcid}
 
-    # Finally delete the VPC
+    # Remove associated route tables
+    delete_route_tables_by_vpc_id ${vpcid}
+
+    # Delete the VPC
     delete_vpc ${vpcid}
+
 
   done < <(list_vpc_by_cluster_tag "$1")
 
