@@ -31,6 +31,8 @@ set -o errexit
 set -o pipefail
 set -o nounset
 
+# Default: attempt to delete AWS and continue even on failure. 
+ALLOW_AWS_ACTION_FAILURE=${ALLOW_AWS_ACTION_FAILURE:-true}
 
 AWS_REGION=${AWS_REGION:-us-east-2}
 AWS_COMMON_ARGS="--region=${AWS_REGION} --output=text"
@@ -78,63 +80,71 @@ dump_state_file () {
   echo "# END $2 " >&2
 }
 
+print_command_allow_failure () {
+  # Some cases will require that commands are allowed to failed, 
+  # e.g. failing to detach a network interface that no longer exists.
+  case "${ALLOW_AWS_ACTION_FAILURE}" in
+    true) echo "$@ || true" ;;
+    *) echo "$@";;
+  esac
+}
 
 delete_asg () {
-  echo aws ${AWS_COMMON_ARGS} autoscaling delete-auto-scaling-group --auto-scaling-group-name "$1" --force-delete
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} autoscaling delete-auto-scaling-group --auto-scaling-group-name "$1" --force-delete
 }
 
 delete_launchconfig () {
-  echo aws ${AWS_COMMON_ARGS} autoscaling delete-launch-configuration --launch-configuration-name "$1"
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} autoscaling delete-launch-configuration --launch-configuration-name "$1"
 }
 
 delete_keypair () {
-  echo aws ${AWS_COMMON_ARGS} ec2 delete-key-pair --key-name "$1"
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} ec2 delete-key-pair --key-name "$1"
 }
 
 delete_instances () {
   [ $# -gt 0 ] || return 0
-  echo aws ${AWS_COMMON_ARGS} ec2 terminate-instances  --instance-ids "$@"
-  echo aws ${AWS_COMMON_ARGS} ec2 wait instance-terminated  --instance-ids "$@"
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} ec2 terminate-instances  --instance-ids "$@"
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} ec2 wait instance-terminated  --instance-ids "$@"
 }
 
 delete_elb (){ 
-  echo aws ${AWS_COMMON_ARGS} elb delete-load-balancer --load-balancer-name "$1"
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} elb delete-load-balancer --load-balancer-name "$1"
 }
 
 delete_vpc () {
-  echo aws ${AWS_COMMON_ARGS} ec2 delete-vpc --vpc-id "$1"
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} ec2 delete-vpc --vpc-id "$1"
 }
 
 delete_eni () {
-  echo aws ${AWS_COMMON_ARGS} ec2 delete-network-interface  \
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} ec2 delete-network-interface  \
     --network-interface-id "$1"
 }
 
 detach_eni () {
-  echo aws ${AWS_COMMON_ARGS} ec2 detach-network-interface --attachment-id "$1"
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} ec2 detach-network-interface --attachment-id "$1"
 }
 
 wait_for_eni_available () {
-  [ $# -eq 0 ] || echo aws ${AWS_COMMON_ARGS} ec2 wait network-interface-available --network-interface-ids ${@}
+  [ $# -eq 0 ] || print_command_allow_failure aws ${AWS_COMMON_ARGS} ec2 wait network-interface-available --network-interface-ids ${@}
 }
 
 
 delete_iam_profile () {
-  echo aws iam delete-instance-profile --instance-profile-name "$1"
+  print_command_allow_failure aws iam delete-instance-profile --instance-profile-name "$1"
 }
 
 delete_iam_role () {
-  echo aws iam delete-role --role-name "$1"
+  print_command_allow_failure aws iam delete-role --role-name "$1"
 }
 
 remove_role_from_instance_profile () {
-  echo aws ${AWS_COMMON_ARGS} iam remove-role-from-instance-profile \
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} iam remove-role-from-instance-profile \
     --instance-profile-name ${2} \
     --role-name ${1}
 }
 
 delete_route53_zone () {
-  echo aws ${AWS_COMMON_ARGS} route53 delete-hosted-zone --id "$1"
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} route53 delete-hosted-zone --id "$1"
 }
 
 delete_route53_zone_records () {
@@ -145,18 +155,18 @@ delete_route53_zone_records () {
 }
 
 delete_route53_resource_recordsets () {
-  echo aws ${AWS_COMMON_ARGS} route53 change-resource-record-sets \
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} route53 change-resource-record-sets \
     --hosted-zone-id "$1" \
     --change-batch "${2}" \
     --output text --query 'ChangeInfo.Id'
 }
 
 delete_subnet_by_id () {
-  echo aws ${AWS_COMMON_ARGS} ec2 delete-subnet  --subnet-id $1
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} ec2 delete-subnet  --subnet-id $1
 }
 
 delete_security_group_by_id () {
-  echo aws ${AWS_COMMON_ARGS} ec2 delete-security-group --group-id $1
+  print_command_allow_failure aws ${AWS_COMMON_ARGS} ec2 delete-security-group --group-id $1
 }
 
 delete_security_groups_by_vpc_id () {
@@ -442,8 +452,12 @@ delete_cluster_artifacts () {
 
     # Remove associated network interfaces
     delete_network_interfaces_by_vpc_id ${vpcid}
-  
+
+    # Remove associated route tables
+    delete_route_tables_by_vpc_id ${vpcid}
+
     # Remove associated subnets
+    # NOTE: this needs to happen AFTER the route tables are removed.
     delete_subnets_by_vpc_id ${vpcid}
     
     # Remove associated gateways
@@ -455,8 +469,6 @@ delete_cluster_artifacts () {
     # Remove associated security groups
     delete_security_groups_by_vpc_id ${vpcid}
 
-    # Remove associated route tables
-    delete_route_tables_by_vpc_id ${vpcid}
 
     # Delete the VPC
     delete_vpc ${vpcid}
